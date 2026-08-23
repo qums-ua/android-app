@@ -12,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.view.Menu
+import android.view.MenuItem
 import android.webkit.CookieManager
 import android.webkit.MimeTypeMap
 import android.webkit.URLUtil
@@ -30,8 +32,16 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.DocumentScanner
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import me.guptaishaan.quarp.ui.theme.QuarpTheme
@@ -81,6 +91,10 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    companion object {
+        private const val MENU_TOGGLE_AUTO_SOLVE = 1
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -96,18 +110,78 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             QuarpTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                // Track auto-solve state for the FAB visibility
+                var hasCaptcha by remember { mutableStateOf(false) }
+
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    floatingActionButton = {
+                        if (hasCaptcha) {
+                            FloatingActionButton(
+                                onClick = {
+                                    webView?.let { wv ->
+                                        CaptchaHelper.extractAndSolveCaptcha(this@MainActivity, wv)
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DocumentScanner,
+                                    contentDescription = "Solve Captcha"
+                                )
+                            }
+                        }
+                    }
+                ) { innerPadding ->
                     QumsWebView(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding),
                         onWebViewCreated = { webView = it },
                         onDownloadRequested = ::showDownloadPermissionDialog,
-                        onShowFileChooser = ::handleShowFileChooser
+                        onShowFileChooser = ::handleShowFileChooser,
+                        onCaptchaDetected = { wv ->
+                            if (CaptchaHelper.isEnabled(this@MainActivity)) {
+                                CaptchaHelper.extractAndSolveCaptcha(this@MainActivity, wv)
+                            }
+                        },
+                        onCaptchaPageChanged = { hasCaptcha = it }
                     )
                 }
             }
         }
+    }
+
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, MENU_TOGGLE_AUTO_SOLVE, 0, toggleMenuTitle())
+        return true
+    }
+
+    override fun onPrepareOptionsMenu(menu: Menu): Boolean {
+        menu.findItem(MENU_TOGGLE_AUTO_SOLVE)?.title = toggleMenuTitle()
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            MENU_TOGGLE_AUTO_SOLVE -> {
+                val currentlyEnabled = CaptchaHelper.isEnabled(this)
+                CaptchaHelper.setEnabled(this, !currentlyEnabled)
+                val newState = !currentlyEnabled
+                Toast.makeText(
+                    this,
+                    if (newState) "Auto-solve captcha: ON" else "Auto-solve captcha: OFF",
+                    Toast.LENGTH_SHORT
+                ).show()
+                invalidateOptionsMenu()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
+    private fun toggleMenuTitle(): String {
+        val enabled = CaptchaHelper.isEnabled(this)
+        return if (enabled) "\u2705 Auto-Solve Captcha: ON" else "\u274C Auto-Solve Captcha: OFF"
     }
 
     override fun onDestroy() {
@@ -259,12 +333,23 @@ class MainActivity : ComponentActivity() {
 
 private const val QUMS_URL = "https://qums.quantumuniversity.edu.in"
 
+/** Pages where a captcha is present and should be auto-solved. */
+private val CAPTCHA_URLS = setOf(
+    "https://qums.quantumuniversity.edu.in",
+    "https://qums.quantumuniversity.edu.in/Account/Login",
+)
+
+/** Strips trailing slash so URLs match regardless of trailing slash. */
+private fun normalizeUrl(url: String?): String = url?.trimEnd('/') ?: ""
+
 @Composable
 fun QumsWebView(
     modifier: Modifier = Modifier,
     onWebViewCreated: (WebView) -> Unit = {},
     onDownloadRequested: (url: String, contentDisposition: String, mimeType: String) -> Unit = { _, _, _ -> },
-    onShowFileChooser: (filePathCallback: ValueCallback<Array<Uri>>?, intent: Intent?) -> Boolean = { _, _ -> false }
+    onShowFileChooser: (filePathCallback: ValueCallback<Array<Uri>>?, intent: Intent?) -> Boolean = { _, _ -> false },
+    onCaptchaDetected: (WebView) -> Unit = {},
+    onCaptchaPageChanged: (Boolean) -> Unit = {}
 ) {
     AndroidView(
         modifier = modifier,
@@ -300,6 +385,15 @@ fun QumsWebView(
                                 }
                             })();
                         """.trimIndent(), null)
+                        // Only detect captcha on known login pages (trailing-slash tolerant)
+                        if (normalizeUrl(url) in CAPTCHA_URLS) {
+                            onCaptchaPageChanged(true)
+                            if (view != null) {
+                                onCaptchaDetected(view)
+                            }
+                        } else {
+                            onCaptchaPageChanged(false)
+                        }
                     }
                 }
 

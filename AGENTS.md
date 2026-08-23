@@ -18,6 +18,7 @@ Single-activity app. `MainActivity` hosts a Compose `Scaffold` containing an `An
 ### Key Files
 
 - `app/src/main/java/me/guptaishaan/quarp/MainActivity.kt` — Activity + `QumsWebView` composable + download handling
+- `app/src/main/java/me/guptaishaan/quarp/CaptchaHelper.kt` — Captcha OCR via ML Kit Text Recognition
 - `app/src/main/AndroidManifest.xml` — Declares INTERNET, WRITE_EXTERNAL_STORAGE permissions, launcher activity, and FileProvider
 - `app/src/main/res/xml/file_paths.xml` — FileProvider paths for sharing downloaded file URIs
 - `app/build.gradle.kts` — App-level dependencies (Compose, WebKit)
@@ -50,6 +51,32 @@ JS dialogs (`alert`, `confirm`, `prompt`) and `<select>` dropdowns use the WebVi
 
 **Pattern**: The `WebChromeClient` lives inside the `QumsWebView` composable's `factory` lambda. For interactions that need an `ActivityResultLauncher` (file upload), a callback is passed from `MainActivity` which owns the launcher. This keeps the composable decoupled from Activity lifecycle.
 
+### Captcha Auto-Fill (ML Kit)
+
+The app automatically solves captchas on the QUMS portal using **Google ML Kit Text Recognition** (bundled Latin-script model).
+
+**How it works:**
+1. On every page load (`onPageFinished`), the URL is normalized (trailing slash stripped) and checked against `CAPTCHA_URLS` (the two login pages). If matched, `onCaptchaPageChanged(true)` shows the FAB and `onCaptchaDetected` fires. Other pages get `onCaptchaPageChanged(false)` which hides the FAB
+2. If a captcha is detected, `onCaptchaDetected` fires and `CaptchaHelper` extracts the base64 image via a two-step JS bridge (store in hidden element then read back) to avoid JSON-quoting issues with data URIs
+3. The base64 string is decoded to an Android `Bitmap`
+4. ML Kit's `TextRecognition` processes the bitmap on-device
+5. The recognized text (whitespace-stripped, uppercased) is injected into `<input id="captcha">` via JS, with `input` and `change` events dispatched
+
+**Key files:**
+- `app/src/main/java/me/guptaishaan/quarp/CaptchaHelper.kt` — OCR logic, JS bridge, Bitmap decoding
+- `app/src/main/java/me/guptaishaan/quarp/MainActivity.kt` — `onCaptchaDetected` callback wiring in `QumsWebView`
+
+**Design decisions:**
+- Uses **bundled** ML Kit (`com.google.mlkit:text-recognition:16.0.1`) so the model ships with the app — no Google Play Services dependency, no first-run download delay
+- The two-step JS bridge (store `imgPhoto.src` in a hidden `#__captchaData__` div, then read it back) avoids WebView `evaluateJavascript` JSON-encoding issues with long base64 data URIs
+- OCR runs asynchronously via ML Kit's `Task` API with `addOnSuccessListener`/`addOnFailureListener`
+- **Silent operation**: No toast on successful fill; toasts only appear on errors (decode failure, ML Kit failure, missing input field)
+- **Retry with backoff**: If OCR returns empty text, retries up to 3 times with increasing delays (500ms, 1000ms, 1500ms) to handle images still loading
+- **Enable/disable toggle**: Options menu item toggles auto-solve on/off, persisted via `SharedPreferences` (`quarp_prefs` / `auto_solve_captcha`). Default: enabled
+- **Manual solve FAB**: A floating action button (bottom-right, with document_scanner icon) lets the user trigger captcha OCR manually. Only visible on the two login URLs (trailing-slash tolerant via `normalizeUrl`)
+- Gracefully skips pages that don't have `#imgPhoto`
+
+
 ### Dark Mode
 
 - The app follows the **system dark/light mode** setting automatically
@@ -69,3 +96,4 @@ Managed via `gradle/libs.versions.toml`. Key additions beyond the default Compos
 
 - `androidx.webkit` — Modern WebView utilities
 - `com.google.android.material:material` — Material3 XML themes and `MaterialAlertDialogBuilder`
+- `com.google.mlkit:text-recognition` — On-device OCR for captcha auto-fill (bundled Latin-script model)
