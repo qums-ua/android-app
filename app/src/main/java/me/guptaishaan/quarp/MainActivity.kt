@@ -289,6 +289,18 @@ fun QumsWebView(
                         // Keep all navigation inside the WebView
                         return false
                     }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        view?.evaluateJavascript("""
+                            (function() {
+                                var el = document.getElementById("captcha");
+                                if (el) {
+                                    el.setAttribute("autocapitalize", "characters");
+                                }
+                            })();
+                        """.trimIndent(), null)
+                    }
                 }
 
                 webChromeClient = object : WebChromeClient() {

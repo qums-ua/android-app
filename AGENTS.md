@@ -35,6 +35,7 @@ Single-activity app. `MainActivity` hosts a Compose `Scaffold` containing an `An
 - After download completes, a dialog offers to open the file with the system-recommended app
 - Downloads use `DownloadManager` and save to the public Downloads folder
 - A `FileProvider` is configured to share file URIs on pre-Android 10 devices
+- After every page load, JS sets `autocapitalize="characters"` on the `#captcha` input so mobile keyboards default to uppercase
 
 ### WebChromeClient Overrides
 
