@@ -27,7 +27,7 @@ Single-activity app. `MainActivity` hosts a Compose `Scaffold` containing an `An
 - JavaScript and DOM storage enabled (required by QUMS)
 - All navigation stays inside the WebView (no external browser launch)
 - Back button navigates web history before exiting the app
-- Loading spinner shown while pages load
+- No loading indicator — pages load silently
 
 ## Building
 
