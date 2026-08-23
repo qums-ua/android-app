@@ -24,7 +24,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import android.app.AlertDialog
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import android.webkit.ValueCallback
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,6 +46,17 @@ class MainActivity : ComponentActivity() {
     /** Holds a pending download while we wait for WRITE_EXTERNAL_STORAGE on API 26-28. */
     private data class PendingDownload(val url: String, val contentDisposition: String, val mimeType: String)
     private var pendingDownload: PendingDownload? = null
+
+    // File upload support (input type="file" in the WebView)
+    private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
+    private val fileUploadLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = fileUploadCallback
+        fileUploadCallback = null
+        val resultUri = result.data?.data
+        callback?.onReceiveValue(if (resultUri != null) arrayOf(resultUri) else null)
+    }
 
     // Permission launcher (only needed for API 26-28)
     private val requestStoragePermission = registerForActivityResult(
@@ -90,7 +102,8 @@ class MainActivity : ComponentActivity() {
                             .fillMaxSize()
                             .padding(innerPadding),
                         onWebViewCreated = { webView = it },
-                        onDownloadRequested = ::showDownloadPermissionDialog
+                        onDownloadRequested = ::showDownloadPermissionDialog,
+                        onShowFileChooser = ::handleShowFileChooser
                     )
                 }
             }
@@ -106,10 +119,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Called by the WebChromeClient when the page wants to open a file chooser.
+     * Delegates to the system file picker via ActivityResultLauncher.
+     */
+    private fun handleShowFileChooser(
+        filePathCallback: ValueCallback<Array<Uri>>?,
+        intent: Intent?
+    ): Boolean {
+        if (intent == null) return false
+        fileUploadCallback?.onReceiveValue(null)
+        fileUploadCallback = filePathCallback
+        fileUploadLauncher.launch(intent)
+        return true
+    }
+
     // Step 1: Ask the user for permission to download
     private fun showDownloadPermissionDialog(url: String, contentDisposition: String, mimeType: String) {
         val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
-        AlertDialog.Builder(this)
+        MaterialAlertDialogBuilder(this)
             .setTitle("Download File")
             .setMessage("Do you want to download \"$fileName\"?")
             .setPositiveButton("Download") { _, _ ->
@@ -160,7 +188,7 @@ class MainActivity : ComponentActivity() {
         Toast.makeText(this, "Download started: $fileName", Toast.LENGTH_SHORT).show()
     }
 
-    // Step 4: Download complete � open the file directly
+    // Step 4: Download complete — open the file directly
     private fun openDownloadedFile(downloadId: Long) {
         val info = getDownloadedFileInfo(downloadId)
         if (info == null) {
@@ -201,7 +229,7 @@ class MainActivity : ComponentActivity() {
 
             val rawUri = Uri.parse(uriString)
 
-            // On pre-Q the URI is file:// which can't be shared via Intent � convert via FileProvider
+            // On pre-Q the URI is file:// which can't be shared via Intent — convert via FileProvider
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && rawUri.scheme == "file") {
                 return try {
                     val path = rawUri.path ?: return null
@@ -216,20 +244,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun getDownloadStatus(downloadId: Long): Int {
-        val query = DownloadManager.Query().setFilterById(downloadId)
-        val cursor = downloadManager.query(query) ?: return -1
-        cursor.use {
-            if (!it.moveToFirst()) return -1
-            val statusIdx = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
-            return it.getInt(statusIdx)
-        }
-    }
 
-    private fun guessMimeTypeFromUri(uri: Uri): String? {
-        val extension = MimeTypeMap.getFileExtensionFromUrl(uri.toString()) ?: return null
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase())
-    }
 
     @Deprecated("Use OnBackPressedCallback instead.")
     override fun onBackPressed() {
@@ -248,7 +263,8 @@ private const val QUMS_URL = "https://qums.quantumuniversity.edu.in"
 fun QumsWebView(
     modifier: Modifier = Modifier,
     onWebViewCreated: (WebView) -> Unit = {},
-    onDownloadRequested: (url: String, contentDisposition: String, mimeType: String) -> Unit = { _, _, _ -> }
+    onDownloadRequested: (url: String, contentDisposition: String, mimeType: String) -> Unit = { _, _, _ -> },
+    onShowFileChooser: (filePathCallback: ValueCallback<Array<Uri>>?, intent: Intent?) -> Boolean = { _, _ -> false }
 ) {
     AndroidView(
         modifier = modifier,
@@ -262,6 +278,7 @@ fun QumsWebView(
                     setSupportZoom(true)
                     builtInZoomControls = true
                     displayZoomControls = false
+
                 }
 
                 webViewClient = object : WebViewClient() {
@@ -274,7 +291,22 @@ fun QumsWebView(
                     }
                 }
 
-                webChromeClient = WebChromeClient()
+                webChromeClient = object : WebChromeClient() {
+                    // File upload (input type="file") — delegates to the system file picker
+                    override fun onShowFileChooser(
+                        webView: WebView?,
+                        filePathCallback: ValueCallback<Array<Uri>>?,
+                        fileChooserParams: FileChooserParams?
+                    ): Boolean {
+                        val intent = fileChooserParams?.createIntent()
+                        return onShowFileChooser(filePathCallback, intent)
+                    }
+
+                    // Geolocation and media permissions — auto-grant for the QUMS portal
+                    override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
+                        request?.grant(request.resources)
+                    }
+                }
 
                 // Intercept download requests from the WebView
                 setDownloadListener { url, _, contentDisposition, mimeType, _ ->
