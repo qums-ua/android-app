@@ -1,13 +1,32 @@
 package me.guptaishaan.quarp
 
+import android.Manifest
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.database.Cursor
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.webkit.CookieManager
+import android.webkit.MimeTypeMap
+import android.webkit.URLUtil
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import android.app.AlertDialog
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -15,14 +34,54 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import me.guptaishaan.quarp.ui.theme.QuarpTheme
+import java.io.File
 
 class MainActivity : ComponentActivity() {
 
     private var webView: WebView? = null
+    private lateinit var downloadManager: DownloadManager
+    private var lastDownloadId: Long = -1L
+
+    /** Holds a pending download while we wait for WRITE_EXTERNAL_STORAGE on API 26-28. */
+    private data class PendingDownload(val url: String, val contentDisposition: String, val mimeType: String)
+    private var pendingDownload: PendingDownload? = null
+
+    // Permission launcher (only needed for API 26-28)
+    private val requestStoragePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val pd = pendingDownload
+        pendingDownload = null
+        if (granted && pd != null) {
+            enqueueDownload(pd.url, pd.contentDisposition, pd.mimeType)
+        } else if (!granted) {
+            Toast.makeText(this, "Storage permission denied \u2014 download cancelled", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // BroadcastReceiver: fires when DownloadManager finishes a download
+    private val downloadCompleteReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val id = intent?.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) ?: return
+            if (id == lastDownloadId && id != -1L) {
+                openDownloadedFile(id)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        downloadManager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+
+        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(downloadCompleteReceiver, filter, RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(downloadCompleteReceiver, filter)
+        }
+
         setContent {
             QuarpTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
@@ -30,11 +89,146 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding),
-                        onWebViewCreated = { webView = it }
+                        onWebViewCreated = { webView = it },
+                        onDownloadRequested = ::showDownloadPermissionDialog
                     )
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            unregisterReceiver(downloadCompleteReceiver)
+        } catch (_: IllegalArgumentException) {
+            // Receiver was not registered â€” safe to ignore
+        }
+    }
+
+    // Step 1: Ask the user for permission to download
+    private fun showDownloadPermissionDialog(url: String, contentDisposition: String, mimeType: String) {
+        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        AlertDialog.Builder(this)
+            .setTitle("Download File")
+            .setMessage("Do you want to download \"$fileName\"?")
+            .setPositiveButton("Download") { _, _ ->
+                requestStorageOrDownload(url, contentDisposition, mimeType)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // Step 2: Ensure we have storage permission (API 26-28), then download
+    private fun requestStorageOrDownload(url: String, contentDisposition: String, mimeType: String) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                == PackageManager.PERMISSION_GRANTED
+            ) {
+                enqueueDownload(url, contentDisposition, mimeType)
+            } else {
+                pendingDownload = PendingDownload(url, contentDisposition, mimeType)
+                requestStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
+        } else {
+            enqueueDownload(url, contentDisposition, mimeType)
+        }
+    }
+
+    // Step 3: Enqueue the download with DownloadManager
+    private fun enqueueDownload(url: String, contentDisposition: String, mimeType: String) {
+        val fileName = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle(fileName)
+            .setDescription("Downloading\u2026")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+            .setAllowedOverMetered(true)
+            .setAllowedOverRoaming(true)
+
+        // Forward cookies from the WebView session so authenticated downloads work
+        val cookies = CookieManager.getInstance().getCookie(url)
+        if (!cookies.isNullOrEmpty()) {
+            request.addRequestHeader("Cookie", cookies)
+        }
+
+        if (mimeType.isNotBlank()) {
+            request.setMimeType(mimeType)
+        }
+
+        lastDownloadId = downloadManager.enqueue(request)
+        Toast.makeText(this, "Download started: $fileName", Toast.LENGTH_SHORT).show()
+    }
+
+    // Step 4: Download complete — open the file directly
+    private fun openDownloadedFile(downloadId: Long) {
+        val info = getDownloadedFileInfo(downloadId)
+        if (info == null) {
+            Toast.makeText(this, "Unable to locate the downloaded file", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val (uri, title, dmMimeType) = info
+        // Best chance: use the filename extension (title like "report.pdf")
+        val ext = MimeTypeMap.getFileExtensionFromUrl(title)
+        val extMime = if (ext.isNotEmpty()) MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext.lowercase()) else null
+        val mimeType = dmMimeType ?: extMime ?: contentResolver.getType(uri)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(intent)
+        } catch (_: Exception) {
+            Toast.makeText(this, "No app found to open this file", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Helpers
+
+    /** Query DownloadManager for the file URI, title, and MIME type. */
+    private fun getDownloadedFileInfo(downloadId: Long): Triple<Uri, String, String?>? {
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor: Cursor = downloadManager.query(query) ?: return null
+        cursor.use {
+            if (!it.moveToFirst()) return null
+
+            val uriIdx = it.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+            val titleIdx = it.getColumnIndex(DownloadManager.COLUMN_TITLE)
+            val mimeTypeIdx = it.getColumnIndex(DownloadManager.COLUMN_MEDIA_TYPE)
+            val uriString = it.getString(uriIdx) ?: return null
+            val title = it.getString(titleIdx) ?: "file"
+            val mimeType = it.getString(mimeTypeIdx)
+
+            val rawUri = Uri.parse(uriString)
+
+            // On pre-Q the URI is file:// which can't be shared via Intent — convert via FileProvider
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && rawUri.scheme == "file") {
+                return try {
+                    val path = rawUri.path ?: return null
+                    val contentUri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", File(path))
+                    Triple(contentUri, title, mimeType)
+                } catch (_: Exception) {
+                    Triple(rawUri, title, mimeType)
+                }
+            }
+
+            return Triple(rawUri, title, mimeType)
+        }
+    }
+
+    private fun getDownloadStatus(downloadId: Long): Int {
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor = downloadManager.query(query) ?: return -1
+        cursor.use {
+            if (!it.moveToFirst()) return -1
+            val statusIdx = it.getColumnIndex(DownloadManager.COLUMN_STATUS)
+            return it.getInt(statusIdx)
+        }
+    }
+
+    private fun guessMimeTypeFromUri(uri: Uri): String? {
+        val extension = MimeTypeMap.getFileExtensionFromUrl(uri.toString()) ?: return null
+        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase())
     }
 
     @Deprecated("Use OnBackPressedCallback instead.")
@@ -53,7 +247,8 @@ private const val QUMS_URL = "https://qums.quantumuniversity.edu.in"
 @Composable
 fun QumsWebView(
     modifier: Modifier = Modifier,
-    onWebViewCreated: (WebView) -> Unit = {}
+    onWebViewCreated: (WebView) -> Unit = {},
+    onDownloadRequested: (url: String, contentDisposition: String, mimeType: String) -> Unit = { _, _, _ -> }
 ) {
     AndroidView(
         modifier = modifier,
@@ -80,6 +275,11 @@ fun QumsWebView(
                 }
 
                 webChromeClient = WebChromeClient()
+
+                // Intercept download requests from the WebView
+                setDownloadListener { url, _, contentDisposition, mimeType, _ ->
+                    onDownloadRequested(url, contentDisposition, mimeType)
+                }
 
                 loadUrl(QUMS_URL)
                 onWebViewCreated(this)

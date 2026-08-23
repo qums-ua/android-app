@@ -17,8 +17,9 @@ Single-activity app. `MainActivity` hosts a Compose `Scaffold` containing an `An
 
 ### Key Files
 
-- `app/src/main/java/me/guptaishaan/quarp/MainActivity.kt` — Activity + `QumsWebView` composable
-- `app/src/main/AndroidManifest.xml` — Declares INTERNET permission and the launcher activity
+- `app/src/main/java/me/guptaishaan/quarp/MainActivity.kt` — Activity + `QumsWebView` composable + download handling
+- `app/src/main/AndroidManifest.xml` — Declares INTERNET, WRITE_EXTERNAL_STORAGE permissions, launcher activity, and FileProvider
+- `app/src/main/res/xml/file_paths.xml` — FileProvider paths for sharing downloaded file URIs
 - `app/build.gradle.kts` — App-level dependencies (Compose, WebKit)
 - `gradle/libs.versions.toml` — Centralized version catalog
 
@@ -28,6 +29,10 @@ Single-activity app. `MainActivity` hosts a Compose `Scaffold` containing an `An
 - All navigation stays inside the WebView (no external browser launch)
 - Back button navigates web history before exiting the app
 - No loading indicator — pages load silently
+- File downloads are intercepted by a `DownloadListener` that shows a confirmation dialog before downloading
+- After download completes, a dialog offers to open the file with the system-recommended app
+- Downloads use `DownloadManager` and save to the public Downloads folder
+- A `FileProvider` is configured to share file URIs on pre-Android 10 devices
 
 ## Building
 

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Maps to Environment.getExternalStorageDirectory() — covers the public Downloads folder -->
+    <external-path name="external" path="." />
+    <!-- Maps to context.getExternalFilesDir() — app-specific external storage -->
+    <external-files-path name="external_files" path="." />
+</paths>
