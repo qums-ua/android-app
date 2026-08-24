@@ -331,7 +331,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private const val QUMS_URL = "https://qums.quantumuniversity.edu.in"
+private const val QUMS_URL = "https://qums.quantumuniversity.edu.in/Account/Cyborg_StudentMenu"
 
 /** Pages where a captcha is present and should be auto-solved. */
 private val CAPTCHA_URLS = setOf(
